@@ -201,7 +201,7 @@ def test_c13_modules(rm:SSHClientWrapper, logger:Logger):
     return
 
 
-def find_psu_fw_mismatches(output_str: str, expected_version: str) -> list[int]:
+def find_psu_fw_mismatches(output_str: str, expected_version: str):
     """
     Parse PSU firmware output and return a list of socket numbers whose
     ImageA Version does not match the expected version.
