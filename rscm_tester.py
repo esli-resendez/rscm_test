@@ -255,9 +255,9 @@ def execute_task(commands, logger, port, delay):
 
 
 
-def check_rscm(logger:Logger, rm_ip:str, rm_port:int, rm_pwd:str, iterations:int, check_c13:bool):
+def check_rscm(logger:Logger, rm_ip:str, rm_port:int, rm_us:str, rm_pwd:str, iterations:int, check_c13:bool):
 
-    rm = SSHClientWrapper(host=rm_ip, port=rm_port, password=rm_pwd, logger=logger)
+    rm = SSHClientWrapper(host=rm_ip, port=rm_port, username=rm_us, password=rm_pwd, logger=logger)
     elapsed = 0
     e_count = 0
     error_latch = False
@@ -269,10 +269,11 @@ def check_rscm(logger:Logger, rm_ip:str, rm_port:int, rm_pwd:str, iterations:int
     fru = rm.query(RM_FRU)
     # Use Powershelf to store the log
     ps = rm.query(SUP_VER)
-    pshelf_sn = extract_serial(ps)
+    pshelf_fru = rm.query(PSF_FRU)
+    pshelf_sn = extract_serial(pshelf_fru)
     logger.rename(pshelf_sn)
 
-    print_w_ts(f"System:\n{fru}\nVersion:\n{v}\nPSU Versions:\n{ps}")
+    print_w_ts(f"System:\n{fru}\nVersion:\n{v}\nPSU Versions:\n{ps}\nPshelf FRU:{pshelf_fru}\n")
 
     if check_c13:
         test_c13_modules(rm, logger)
@@ -369,7 +370,8 @@ def main():
     parser.add_argument("-t", type=int, choices=[1, 2], required=True, default=1, help="Task number to be Executed")
     parser.add_argument("-rmip", type=str, default="127.0.0.1", help="Rack Manager IP")
     parser.add_argument("-rpo", type=int, default=22, help="Rack manager SSH Port (default 22)")
-    parser.add_argument("-rpw", type=str, default="", help="R-SCM PwD")
+    parser.add_argument("-rpw", type=str, default="", help="Sys Contra")
+    parser.add_argument("-rus", type=str, default="root", help="Sys log")
     parser.add_argument("-n", type=str, default="10", help="Slot position in a Rack")
     parser.add_argument("-c", type=int, default=1.0, help="Cycle Iteration")
     parser.add_argument("-a", action="store_true")
@@ -382,12 +384,13 @@ def main():
     rm_ip = args.rmip # rack manager IP
     rm_port = args.rpo # rack manager's SSH port
     rm_pwd = args.rpw # rm pwd
+    rm_us = args.rus # login
     iterations = args.c # number of times to execute
 
     logger = Logger(task_id, node)
 
     if task_id == 1:
-        check_rscm(logger, rm_ip, rm_port, rm_pwd, iterations, single_check)
+        check_rscm(logger, rm_ip, rm_port, rm_us, rm_pwd, iterations, single_check)
     elif task_id==2:
         rscm_psu_fw_upgrade(logger, rm_ip, rm_port, node)
 
