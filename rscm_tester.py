@@ -262,6 +262,7 @@ def check_rscm(logger:Logger, rm_ip:str, rm_port:int, rm_us:str, rm_pwd:str, ite
     e_count = 0
     error_latch = False
     stats = new_stats(T9_LIST)
+    start_time = datetime.now()
     rm.connect()
 
     print_w_ts("Display version and FRU")
@@ -313,6 +314,7 @@ def check_rscm(logger:Logger, rm_ip:str, rm_port:int, rm_us:str, rm_pwd:str, ite
                 time.sleep(0.2)
             elapsed = elapsed+1
         print_w_ts("[++] Completed all commands in main task without interruptions")
+        print_w_ts(f"Elapsed time: {datetime.now() - start_time}")
         if error_latch:
             print_w_ts("[FFF] - Test result is fail, one or more systems failed")
         else:
