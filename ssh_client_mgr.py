@@ -6,7 +6,7 @@ import re
 from datetime import datetime
 
 class SSHClientWrapper:
-    def __init__(self, host="localhost", port=22, username="root", password="msft", logger=None):
+    def __init__(self, host="localhost", port=22, username="", password="", logger=None):
         self.host = host
         self.port = port
         self.username = username

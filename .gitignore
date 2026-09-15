@@ -1,0 +1,10 @@
+# Ignore cache
+__pycache__/
+__pycache__/*
+
+# Ignore logs
+output/*.log
+output/*
+
+
+

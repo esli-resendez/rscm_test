@@ -8,6 +8,16 @@ from datetime import datetime
 from logger_util import Logger
 from ssh_client_mgr import SSHClientWrapper
 
+_SERIAL_LABELS = [r'product', r'(?:chassis|system)', r'board', r'']
+_SERIAL_PATTERNS = [
+    re.compile(
+        rf'^\s*{lbl}\s*serial\s*(?:number|num|no\.?|#)?\s*[:=]\s*(\S+)',
+        re.IGNORECASE | re.MULTILINE
+    )
+    for lbl in _SERIAL_LABELS
+]
+_PLACEHOLDERS = {"none", "n/a", "na", "unknown", "unspecified", "null", "0"}
+
 # =========================
 # TASK DEFINITIONS
 # =========================
@@ -42,10 +52,44 @@ C13_READING = [f"show powershelf c13 reading -c {x+1}" for x in range(4)]
 T9_LIST = [RM_FRU, HUM, VOLT, PSF_FRU, C13_FRU, C13_READING_ALL] + C13_FRU_IND
 
 
+def new_stats(commands):
+    return {cmd: {"sent": 0, "failed": 0} for cmd in commands}
+
 
 def print_w_ts(text):
     print(f"{datetime.now().strftime('%y/%m/%d %H:%M:%S')}\t{text}")
     return
+
+def log_command_summary(logger:Logger, stats):
+    """Print + log a per-command table. Returns True if everything passed."""
+    width = max([len(c) for c in stats] + [len("COMMAND")])
+    header = f"{'COMMAND':<{width}}  {'SENT':>6}  {'FAILED':>6}  {'FAIL %':>8}"
+    sep = "-" * len(header)
+
+    lines = [header, sep]
+    total_sent = 0
+    total_failed = 0
+    passed = True
+
+    for cmd, s in stats.items():
+        sent, failed = s["sent"], s["failed"]
+        pct = (failed / sent * 100) if sent else 0.0
+        if pct > 0:
+            passed = False
+        lines.append(f"{cmd:<{width}}  {sent:>6}  {failed:>6}  {pct:>7.2f}%")
+        total_sent += sent
+        total_failed += failed
+
+    total_pct = (total_failed / total_sent * 100) if total_sent else 0.0
+    lines.append(sep)
+    lines.append(f"{'TOTAL':<{width}}  {total_sent:>6}  {total_failed:>6}  {total_pct:>7.2f}%")
+    lines.append(sep)
+    lines.append(f"RESULT: {'PASSED' if passed else 'FAILED'}")
+
+    table = "\n".join(lines)
+    print_w_ts(f"Command execution summary:\n{table}")
+    logger.log("SUMMARY", table)
+    return passed
 
 def pull_journal_log(node:SSHClientWrapper, node_pos):
     journal_log = Logger("journal_log", node_pos)
@@ -53,6 +97,21 @@ def pull_journal_log(node:SSHClientWrapper, node_pos):
     journal_log.log("journalctl", journal_txt)
     journal_log.close()
     return
+
+
+def extract_serial(fru_output:str):
+    """ Pass the FRU and get the serial. Falls back to any field with an usable SN"""
+    if not fru_output:
+        return None
+    for pat in _SERIAL_PATTERNS:
+        for m in pat.finditer(fru_output):
+            raw = m.group(1).strip()
+            if raw.lower() in _PLACEHOLDERS:
+                continue
+            sn = re.sub(r'[^A-Za-z0-9._-]', '_', raw)[:32]
+            if sn.strip('_'):
+                return sn
+    return None
 
 def wait_for_ssh(host="127.0.0.1", port=22, timeout=300, interval=2, logger=None):
     """
@@ -75,29 +134,6 @@ def wait_for_ssh(host="127.0.0.1", port=22, timeout=300, interval=2, logger=None
                 return False
             time.sleep(interval)
 
-
-def print_result(result):
-
-    if not result:
-        print(r"""
-        ██████╗  █████╗ ███████╗███████╗
-        ██╔══██╗██╔══██╗██╔════╝██╔════╝
-        ██████╔╝███████║███████╗███████╗
-        ██╔═══╝ ██╔══██║╚════██║╚════██║
-        ██║     ██║  ██║███████║███████║
-        ╚═╝     ╚═╝  ╚═╝╚══════╝╚══════╝
-        """)
-
-    else:
-        print(r"""
-        ███████╗ █████╗ ██╗██╗
-        ██╔════╝██╔══██╗██║██║
-        █████╗  ███████║██║██║
-        ██╔══╝  ██╔══██║██║██║
-        ██║     ██║  ██║██║███████╗
-        ╚═╝     ╚═╝  ╚═╝╚═╝╚══════╝
-        """)
-    return
 
 def check_error_found(output):
     return "Failure" in output
@@ -225,16 +261,19 @@ def check_rscm(logger:Logger, rm_ip:str, rm_port:int, rm_pwd:str, iterations:int
     elapsed = 0
     e_count = 0
     error_latch = False
+    stats = new_stats(T9_LIST)
     rm.connect()
 
     print_w_ts("Display version and FRU")
     v = rm.query(RM_VER)
     fru = rm.query(RM_FRU)
+    # Use Powershelf to store the log
     ps = rm.query(SUP_VER)
+    pshelf_sn = extract_serial(ps)
+    logger.rename(pshelf_sn)
 
     print_w_ts(f"System:\n{fru}\nVersion:\n{v}\nPSU Versions:\n{ps}")
 
-    # single read of fw ver and abort if not working
     if check_c13:
         test_c13_modules(rm, logger)
         return
@@ -245,8 +284,10 @@ def check_rscm(logger:Logger, rm_ip:str, rm_port:int, rm_pwd:str, iterations:int
             for cmd in T9_LIST:
                 try:
                     print_w_ts(f"Checking R-SCM Cli - {elapsed} cmd: {cmd}")
+                    stats[cmd]["sent"] += 1 
                     output = rm.query(cmd)
                     if check_error_found(output):
+                        stats[cmd]["failed"] += 1          
                         error_latch = True
                         print_w_ts("[----] Error found in command, RM failure")
                         logger.log("error", f"Error found in command: {cmd}")
@@ -254,7 +295,6 @@ def check_rscm(logger:Logger, rm_ip:str, rm_port:int, rm_pwd:str, iterations:int
                         if e_count > 10:
                             logger.log("error", f"10 or more consecutive errors found")
                             print_w_ts("Consecutive error count reached, attempt a reset in c13 c5 module")
-                            # Attempt to reset the C13 module 
                             if reset_c13_module(rm, logger):
                                 print_w_ts("recovery successful")
                             else:
@@ -262,24 +302,29 @@ def check_rscm(logger:Logger, rm_ip:str, rm_port:int, rm_pwd:str, iterations:int
                                 raise KeyboardInterrupt
                     else:
                         time.sleep(0.2)
-                        e_count = 0 # This is to count consecutive errors
-                # Handle exception to close the log file
+                        e_count = 0
+                except KeyboardInterrupt:
+                    raise
                 except Exception as e:
-                    logger.log("ERROR",f"Exception created, details:\n{e}\n")
+                    stats[cmd]["failed"] += 1 
+                    logger.log("ERROR", f"Exception created, details:\n{e}\n")
                     raise e
                 time.sleep(0.2)
             elapsed = elapsed+1
         print_w_ts("[++] Completed all commands in main task without interruptions")
-        print_result(error_latch)
+        if error_latch:
+            print_w_ts("[FFF] - Test result is fail, one or more systems failed")
+        else:
+            print_w_ts("[+] No Failures found, screening PASS")
 
     except KeyboardInterrupt:
         print_w_ts("[+] Interrupted task... exiting now")
     finally:
+        passed = log_command_summary(logger, stats) 
         rm.close()
-        #node.close()
         logger.close()
 
-    return
+    return passed
 
 
 def rscm_psu_fw_upgrade(logger, rm_ip, rm_port, rm_pwd, expected_ver):
@@ -324,7 +369,7 @@ def main():
     parser.add_argument("-t", type=int, choices=[1, 2], required=True, default=1, help="Task number to be Executed")
     parser.add_argument("-rmip", type=str, default="127.0.0.1", help="Rack Manager IP")
     parser.add_argument("-rpo", type=int, default=22, help="Rack manager SSH Port (default 22)")
-    parser.add_argument("-rpw", type=str, default="$pl3nd1D", help="R-SCM PwD")
+    parser.add_argument("-rpw", type=str, default="", help="R-SCM PwD")
     parser.add_argument("-n", type=str, default="10", help="Slot position in a Rack")
     parser.add_argument("-c", type=int, default=1.0, help="Cycle Iteration")
     parser.add_argument("-a", action="store_true")
@@ -333,7 +378,7 @@ def main():
 
     task_id = args.t
     node = args.n
-    ac_cycle = args.a
+    single_check = args.a
     rm_ip = args.rmip # rack manager IP
     rm_port = args.rpo # rack manager's SSH port
     rm_pwd = args.rpw # rm pwd
@@ -342,7 +387,7 @@ def main():
     logger = Logger(task_id, node)
 
     if task_id == 1:
-        check_rscm(logger, rm_ip, rm_port, rm_pwd, iterations, ac_cycle)
+        check_rscm(logger, rm_ip, rm_port, rm_pwd, iterations, single_check)
     elif task_id==2:
         rscm_psu_fw_upgrade(logger, rm_ip, rm_port, node)
 
